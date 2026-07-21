@@ -1,0 +1,165 @@
+5dof_joint/armature:
+  frozen: false
+  max_value:
+  - 0.5
+  min_value:
+  - 0.0001
+  name: 5dof_joint/armature
+  nominal:
+  - 0.004
+  value:
+  - 0.004
+5dof_joint/damping:
+  frozen: false
+  max_value:
+  - 5.0
+  min_value:
+  - 0.0
+  name: 5dof_joint/damping
+  nominal:
+  - 0.02
+  value:
+  - 0.02
+5dof_joint/frictionloss:
+  frozen: false
+  max_value:
+  - 3.0
+  min_value:
+  - 0.0
+  name: 5dof_joint/frictionloss
+  nominal:
+  - 0.1
+  value:
+  - 0.1
+arm_base_joint/armature:
+  frozen: false
+  max_value:
+  - 0.5
+  min_value:
+  - 0.0001
+  name: arm_base_joint/armature
+  nominal:
+  - 0.004
+  value:
+  - 0.004
+arm_base_joint/damping:
+  frozen: false
+  max_value:
+  - 5.0
+  min_value:
+  - 0.0
+  name: arm_base_joint/damping
+  nominal:
+  - 0.02
+  value:
+  - 0.02
+arm_base_joint/frictionloss:
+  frozen: false
+  max_value:
+  - 3.0
+  min_value:
+  - 0.0
+  name: arm_base_joint/frictionloss
+  nominal:
+  - 0.1
+  value:
+  - 0.1
+arm_joint/armature:
+  frozen: false
+  max_value:
+  - 0.5
+  min_value:
+  - 0.0001
+  name: arm_joint/armature
+  nominal:
+  - 0.004
+  value:
+  - 0.004
+arm_joint/damping:
+  frozen: false
+  max_value:
+  - 5.0
+  min_value:
+  - 0.0
+  name: arm_joint/damping
+  nominal:
+  - 0.02
+  value:
+  - 0.02
+arm_joint/frictionloss:
+  frozen: false
+  max_value:
+  - 3.0
+  min_value:
+  - 0.0
+  name: arm_joint/frictionloss
+  nominal:
+  - 0.1
+  value:
+  - 0.1
+fore_arm_joint/armature:
+  frozen: false
+  max_value:
+  - 0.5
+  min_value:
+  - 0.0001
+  name: fore_arm_joint/armature
+  nominal:
+  - 0.004
+  value:
+  - 0.004
+fore_arm_joint/damping:
+  frozen: false
+  max_value:
+  - 5.0
+  min_value:
+  - 0.0
+  name: fore_arm_joint/damping
+  nominal:
+  - 0.02
+  value:
+  - 0.02
+fore_arm_joint/frictionloss:
+  frozen: false
+  max_value:
+  - 3.0
+  min_value:
+  - 0.0
+  name: fore_arm_joint/frictionloss
+  nominal:
+  - 0.1
+  value:
+  - 0.1
+upper_arm_joint/armature:
+  frozen: false
+  max_value:
+  - 0.5
+  min_value:
+  - 0.0001
+  name: upper_arm_joint/armature
+  nominal:
+  - 0.004
+  value:
+  - 0.004
+upper_arm_joint/damping:
+  frozen: false
+  max_value:
+  - 5.0
+  min_value:
+  - 0.0
+  name: upper_arm_joint/damping
+  nominal:
+  - 0.02
+  value:
+  - 0.02
+upper_arm_joint/frictionloss:
+  frozen: false
+  max_value:
+  - 3.0
+  min_value:
+  - 0.0
+  name: upper_arm_joint/frictionloss
+  nominal:
+  - 0.1
+  value:
+  - 0.1

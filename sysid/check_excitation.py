@@ -1,29 +1,24 @@
 """Offline sizing + verification of the arm sysID excitation (no hardware).
 
-The earlier armature identification gap traced to the excitation *saturating* the
-proximal joints (|tau| pinned at the +-27 Nm ctrlrange): saturated / under-damped
-intervals carry almost no information about armature (which only shows up through
-joint acceleration), so the optimiser could not pin it. The distal joint, which
-never saturated, was identified fine.
+WHY THIS EXISTS: the earlier armature-identification gap traced to the excitation
+SATURATING the proximal joints (|tau| pinned at the +-27 Nm ctrlrange). Saturated
+intervals carry almost no armature information (it only shows through joint
+acceleration), so the optimiser could not pin it; the never-saturating distal joint
+was identified fine.
 
-This tool simulates the excitation through the arm model using the **same
-torque-clamped PD law as the Unitree MuJoCo bridge**
-(`simulate_python/unitree_sdk2py_bridge.py:111-123`):
+Simulates the excitation with the SAME torque-clamped PD law as the Unitree MuJoCo
+bridge (`simulate_python/unitree_sdk2py_bridge.py:111-123`):
 
-    ctrl = kp*(q_cmd - q) + kd*(dq_cmd - dq),  then clamp to the actuator ctrlrange
+    ctrl = kp*(q_cmd - q) - kd*dq,  then clamp to the actuator ctrlrange
 
-and then:
-  * **sizes** each joint's amplitude so realized peak |tau| and |dq| stay under the
-    per-joint design caps TARGET_TAU / TARGET_DQ (well below ctrlrange -> no
-    saturation), printing constants to paste into collect_data.py;
-  * **reports** per-joint peak |tau|, peak |dq|, accel RMS and saturation fraction;
-  * runs an **observability check**: injects distinct known parameters, regenerates
-    data with this excitation, refits, and prints recovery + 95% confidence
-    intervals -- so you can see armature is now identifiable on every joint.
+then SIZES each amplitude so realized |tau|/|dq| stay under TARGET_TAU/TARGET_DQ
+(printing constants to paste into collect_data.py), REPORTS realized peaks and
+saturation, and runs an OBSERVABILITY check that refits known injected parameters.
 
 Usage:
-    python check_excitation.py                 # size + verify + observability (NEW)
-    python check_excitation.py --compare-old   # also show the old saturating excitation
+    python check_excitation.py                 # size + verify + observability
+    python check_excitation.py --compare-old   # also show the old saturating one
+    python check_excitation.py --analyze <npz> # realized peaks from collected data
 """
 
 from __future__ import annotations
@@ -45,26 +40,25 @@ import sysid_common as C
 import collect_data as cd
 from sim2sim_selftest import TRUE  # large distinct known params (default GT)
 
-# A small, distinct GT near the arm's real regime (armature ~0.004 etc.). At this
-# scale armature is only marginally observable, so it exposes the excitation's
-# effect far more clearly than the large TRUE values do.
+# Small distinct GT near the arm's real regime. At this scale armature is only
+# marginally observable, so it exposes the excitation's effect far more clearly
+# than the large TRUE values do.
 SMALL_GT = {
-    "armature":     np.array([0.004, 0.006, 0.005, 0.007, 0.004]),
-    "frictionloss": np.array([0.10, 0.13, 0.11, 0.09, 0.08]),
-    "damping":      np.array([0.02, 0.03, 0.025, 0.015, 0.02]),
+    "armature":     np.array([0.004, 0.006, 0.005, 0.007, 0.004, 0.005]),
+    "frictionloss": np.array([0.10, 0.13, 0.11, 0.09, 0.08, 0.09]),
+    "damping":      np.array([0.02, 0.03, 0.025, 0.015, 0.02, 0.02]),
 }
 
 # The original excitation that saturated the proximal joints (for --compare-old).
-OLD_AMP = np.array([0.6, 0.6, 0.6, 0.5, 0.7])
+OLD_AMP = np.array([0.6, 0.6, 0.6, 0.5, 0.7, 0.7])
 OLD_F1 = 2.0
 OLD_COMBINED = 0.6
 
 
 def simulate_clamped_pd(model, q_cmd, kp, kd):
-    """Bridge-accurate rollout: clamped-PD torque -> mj_step. Returns q, dq,
-    tau_applied (post-clamp, == tau_est), tau_cmd (pre-clamp)."""
+    """Bridge-accurate rollout: clamped-PD torque -> mj_step.
+    -> q, dq, tau_applied (post-clamp, == tau_est), tau_cmd (pre-clamp)."""
     dt = model.opt.timestep
-    dqc = np.gradient(q_cmd, dt, axis=0)
     lo = model.actuator_ctrlrange[:, 0].copy()
     hi = model.actuator_ctrlrange[:, 1].copy()
     data = mujoco.MjData(model)
@@ -75,7 +69,8 @@ def simulate_clamped_pd(model, q_cmd, kp, kd):
     tau_ap = np.zeros((n, C.NUM_MOTORS)); tau_cmd = np.zeros((n, C.NUM_MOTORS))
     for k in range(n):
         q[k] = data.qpos; dq[k] = data.qvel
-        u = kp * (q_cmd[k] - data.qpos) + kd * (dqc[k] - data.qvel)
+        # Collector and pineapple_arm.py both command zero desired velocity.
+        u = kp * (q_cmd[k] - data.qpos) - kd * data.qvel
         tau_cmd[k] = u
         uc = np.clip(u, lo, hi)
         tau_ap[k] = uc
@@ -91,31 +86,31 @@ def _single_joint_cmd(j, a, f1j, dt, dur=10.0, f0=0.1, tri_hz=0.1):
     tj = np.arange(k) * dt
     chirp = np.sin(2 * np.pi * (f0 * tj + 0.5 * (f1j - f0) / (tj[-1] + 1e-9) * tj**2))
     tri = 2.0 / np.pi * np.arcsin(np.sin(2 * np.pi * tri_hz * tj))
+    envelope = cd._smooth_envelope(k, dt, taper_s=0.5)
     qc = np.tile(cd.CENTER, (k, 1))
-    qc[:, j] = cd.CENTER[j] + a * (0.7 * chirp + 0.3 * tri)
+    qc[:, j] = cd.CENTER[j] + a * envelope * (0.7 * chirp + 0.3 * tri)
     return np.clip(qc, cd.JOINT_LOW + 0.05, cd.JOINT_HIGH - 0.05)
 
 
 def size_amplitudes(model, kp, kd, f1, dt, per_joint_s=14.0,
-                    margin_tau=0.8, margin_dq=0.85, iters=16):
-    """Iteratively size per-joint amplitudes so the FULL sequential trajectory's
-    realized peak |tau| and |dq| sit near margin*caps in the SYNCHRONOUS model.
+                    margin_tau=0.8, margin_dq=0.85, iters=30):
+    """Size per-joint amplitudes so the full trajectory's realized peak |tau|/|dq|
+    sit near margin*caps in the SYNCHRONOUS model.
 
-    Unlike per-joint sizing, this simulates the whole excitation and attributes
-    each joint's over-cap peak to the joint actually MOVING at that instant, so
-    the coupling culprit -- not just the victim -- is scaled (a held joint spikes
-    when a neighbour sweeps it through gravity). The margins are <1 because the
-    async-DDS unitree_mujoco simulator runs hotter than this synchronous check;
-    always re-verify realized peaks with --analyze on collected data.
+    Simulates the WHOLE excitation and attributes each over-cap peak to the joint
+    actually MOVING, so the coupling culprit is scaled, not just the victim (a held
+    joint spikes when a neighbour sweeps it through gravity).
+
+    WARNING: margins are <1 because the async-DDS simulator runs hotter than this
+    synchronous check. Always re-verify realized peaks with --analyze.
     """
-    cap = cd._range_cap()
+    cap = np.minimum(cd._range_cap(), cd.DESIGN_AMP_MAX)
     hi_ctrl = np.abs(model.actuator_ctrlrange[:, 1])
-    # Effective torque target: never above the design cap, and always safely below
-    # the motor's real ctrlrange (else the joint clamps/saturates -- what happened
-    # to j3/j4 whose +-7 Nm motors sit under a 10 Nm design cap).
+    # Never above the design cap, and safely below the motor's real ctrlrange --
+    # else the joint saturates, as j3/j4 did (+-7 Nm motors under a 10 Nm cap).
     tau_lim = np.minimum(margin_tau * np.asarray(cd.TARGET_TAU, float), 0.9 * hi_ctrl)
     dq_lim = margin_dq * np.asarray(cd.TARGET_DQ, float)
-    amp = np.minimum(cap, np.array([0.2, 0.3, 0.35, 0.5, 0.6]))
+    amp = np.minimum(cap, np.full(C.NUM_MOTORS, 0.3))
     peak_tau = np.zeros(C.NUM_MOTORS)
     peak_dq = np.zeros(C.NUM_MOTORS)
     for _ in range(iters):
@@ -130,14 +125,31 @@ def size_amplitudes(model, kp, kd, f1, dt, per_joint_s=14.0,
         ratio = np.minimum(tau_lim / np.maximum(peak_tau, 1e-6),
                            dq_lim / np.maximum(peak_dq, 1e-6))     # victim scaling
         for j in range(C.NUM_MOTORS):
-            culprit = int(active[int(np.argmax(np.abs(tau_ap[:, j])))])
-            if culprit >= 0:  # attribute coupling spikes to the joint truly moving
-                ratio[culprit] = min(ratio[culprit], tau_lim[j] / max(peak_tau[j], 1e-6))
-        if np.all(peak_tau <= tau_lim + 1e-3) and np.all(peak_dq <= dq_lim + 1e-2):
-            # within target -- allow gentle growth toward the cap next round
-            if np.all(ratio > 1.0):
-                break
+            if peak_tau[j] <= tau_lim[j]:
+                continue
+            # shrink EVERY joint that is moving while joint j is over its limit
+            # (coupling spikes on a gravity-loaded joint come from all of them,
+            # not just the single worst instant -> avoids whack-a-mole).
+            r_j = tau_lim[j] / peak_tau[j]
+            for c in np.unique(active[np.abs(tau_ap[:, j]) > tau_lim[j]]):
+                if c >= 0:
+                    ratio[int(c)] = min(ratio[int(c)], r_j)
+        prev_amp = amp
         amp = np.minimum(amp * np.clip(ratio ** 0.6, 0.5, 1.25), cap)  # damped
+        # Stop only once the amplitudes have CONVERGED. The old code broke as soon
+        # as every peak was under its limit, so the "gentle growth toward the cap"
+        # never actually happened and the excitation stayed weaker than necessary.
+        if np.all(peak_tau <= tau_lim + 1e-3) and np.all(peak_dq <= dq_lim + 1e-2) \
+                and np.allclose(amp, prev_amp, rtol=1e-3, atol=1e-4):
+            break
+    # Ensure reported peaks correspond to the returned amplitude even if the
+    # iteration budget was exhausted immediately after an update.
+    _, qc = cd.build_excitation(
+        dt=dt, per_joint_s=per_joint_s, amp=amp, f1=f1, combined_s=0.0
+    )
+    _, dq, tau_ap, _ = simulate_clamped_pd(model, qc, kp, kd)
+    peak_tau = np.abs(tau_ap).max(0)
+    peak_dq = np.abs(dq).max(0)
     rows = [(C.JOINTS[j], amp[j], peak_tau[j], peak_dq[j],
              cd.TARGET_TAU[j], cd.TARGET_DQ[j], 0.0,
              "tau" if peak_tau[j] >= tau_lim[j] - 1e-2 else "dq/interior")
@@ -168,9 +180,12 @@ def report_peaks(model, t, q_cmd, kp, kd, label):
 
 
 def observability(amp, f1, combined_scale, kp, kd, dt, label, gt=TRUE,
-                  per_joint_s=8.0, combined_s=8.0):
-    """Inject distinct known params ``gt``, regenerate with this excitation,
-    refit, report armature/damping/friction recovery + 95% CI."""
+                  per_joint_s=8.0, combined_s=8.0, max_relerr=0.25):
+    """Inject known params, regenerate, refit, report recovery + 95% CI.
+
+    True only if the optimizer converged AND armature recovery is within
+    ``max_relerr`` (median) / ``2*max_relerr`` (worst), so a useless excitation
+    cannot silently report success."""
     t, q_cmd = cd.build_excitation(dt=dt, per_joint_s=per_joint_s, combined_s=combined_s,
                                    amp=amp, f1=f1, combined_scale=combined_scale)
     # ground truth (distinct, known)
@@ -204,18 +219,27 @@ def observability(amp, f1, combined_scale, kp, kd, dt, label, gt=TRUE,
         if n.endswith("/armature"):
             arm_err.append(rel)
         print(f"{n:30s} {g:9.4g} {v:9.4g} {rel*100:6.1f}% {c:9.2g}")
-    print(f"  -> armature median rel err: {np.median(arm_err)*100:.1f}%  "
-          f"max: {np.max(arm_err)*100:.1f}%")
+    med, mx = float(np.median(arm_err)), float(np.max(arm_err))
+    ok = bool(getattr(res, "success", False)) and med <= max_relerr and mx <= 2.0 * max_relerr
+    print(f"  -> armature median rel err: {med*100:.1f}%  max: {mx*100:.1f}%  "
+          f"(limits {max_relerr*100:.0f}%/{2*max_relerr*100:.0f}%)")
+    if not bool(getattr(res, "success", False)):
+        print("  -> FAIL: optimizer did not converge")
+    print(f"  -> {'PASS: excitation identifies armature' if ok else 'FAIL: poor recovery'}")
+    return ok
 
 
 def analyze_data(path, dt=None):
     """Report REALIZED per-joint peaks/saturation/tracking from a COLLECTED .npz.
 
-    This is the faithful check (the offline sizer under-predicts the async sim):
-    run it on freshly collected data to confirm the excitation respected the caps
-    and the joints tracked their commands. No fit -- use sysid_fit.py for that.
+    The faithful check -- the offline sizer under-predicts the async sim. No fit.
     """
     log = C.load_log(path)
+    try:
+        C.validate_log(log, drive="pd")
+    except (TypeError, ValueError) as e:
+        print(f"[analyze] ERROR: invalid log: {e}")
+        return 2
     t = np.asarray(log["t"], float)
     q, dq, tau = (np.asarray(log[k], float) for k in ("q", "dq", "tau"))
     q_cmd = np.asarray(log["q_cmd"], float)
@@ -233,7 +257,9 @@ def analyze_data(path, dt=None):
         ptau = np.abs(tau[:, j]).max()
         sat = 100.0 * np.mean(np.abs(tau[:, j]) >= 0.99 * crng[j])
         pdq = np.abs(dq[:, j]).max()
-        trk = float(np.std(q[:, j] - q_cmd[:, j]))
+        # True RMS about zero: std would subtract a constant tracking offset,
+        # which is itself a tracking failure.
+        trk = float(np.sqrt(np.mean((q[:, j] - q_cmd[:, j]) ** 2)))
         mot = float(np.std(q[:, j]))
         over_tau = ptau > cd.TARGET_TAU[j] + 0.1
         over_dq = pdq > cd.TARGET_DQ[j] + 0.5
@@ -244,7 +270,7 @@ def analyze_data(path, dt=None):
         if bad_track: flag += " TRACK!"
         ok = ok and not flag
         print(f"{C.JOINTS[j]:16s} {ptau:6.2f} {cd.TARGET_TAU[j]:4.0f} {crng[j]:5.0f} "
-              f"{sat:5.1f} {pdq:6.2f} {cd.TARGET_DQ[j]:4.0f} {trk:8.4f} {mot:8.4f}{flag}")
+              f"{sat:5.2f} {pdq:6.2f} {cd.TARGET_DQ[j]:4.0f} {trk:8.4f} {mot:8.4f}{flag}")
     print(f"  -> {'PASS: within caps and tracking well' if ok else 'ISSUES flagged above'}")
     print("  (TAU!=over torque cap/saturating, DQ!=over velocity cap, "
           "TRACK!=tracking error > half the motion). Next: sysid_fit.py --data " + path)
@@ -257,6 +283,9 @@ def main() -> int:
     ap.add_argument("--compare-old", action="store_true",
                     help="also evaluate the previous (saturating) excitation")
     ap.add_argument("--dt", type=float, default=C.DT_DEFAULT)
+    ap.add_argument("--max-relerr", type=float, default=0.25,
+                    help="max median armature relative error for the observability "
+                         "check to PASS (worst-case limit is 2x this)")
     ap.add_argument("--no-observability", action="store_true",
                     help="skip the (slower) synthetic recovery fit")
     ap.add_argument("--small-gt", action="store_true",
@@ -289,22 +318,32 @@ def main() -> int:
     # --- verify the FULL new excitation (sequential, combined phase off) -----
     t, q_new = cd.build_excitation(dt=args.dt, per_joint_s=14.0, amp=amp_new,
                                    f1=cd.F1, combined_s=0.0)
-    report_peaks(nominal, t, q_new, kp, kd, "NEW (sized)")
+    # Fail-closed so CI cannot treat printed failures as success.
+    peaks_ok = report_peaks(nominal, t, q_new, kp, kd, "NEW (sized)")
 
     if args.compare_old:
         t_o, q_old = cd.build_excitation(dt=args.dt, per_joint_s=12.0, amp=OLD_AMP,
                                          f1=OLD_F1, combined_s=15.0,
                                          combined_scale=OLD_COMBINED)
-        report_peaks(nominal, t_o, q_old, kp, kd, "OLD (previous)")
+        report_peaks(nominal, t_o, q_old, kp, kd, "OLD (previous)")  # reference only
 
     # --- observability: does the excitation actually identify armature? ------
+    obs_ok = True
     if not args.no_observability:
-        observability(amp_new, cd.F1, 0.0, kp, kd, args.dt, "NEW (sized)",
-                      gt=gt, per_joint_s=5.0, combined_s=0.0)
+        obs_ok = observability(amp_new, cd.F1, 0.0, kp, kd, args.dt, "NEW (sized)",
+                               gt=gt, per_joint_s=5.0, combined_s=0.0,
+                               max_relerr=args.max_relerr)
         if args.compare_old:
             observability(OLD_AMP, OLD_F1, OLD_COMBINED, kp, kd, args.dt,
-                          "OLD (previous)", gt=gt, per_joint_s=5.0, combined_s=6.0)
-    return 0
+                          "OLD (previous)", gt=gt, per_joint_s=5.0, combined_s=6.0,
+                          max_relerr=args.max_relerr)  # reference only
+
+    if peaks_ok and obs_ok:
+        return 0
+    print("\n[check] FAILED: "
+          + ", ".join(m for m, k in (("excitation exceeds caps", not peaks_ok),
+                                     ("armature not identifiable", not obs_ok)) if k))
+    return 1
 
 
 if __name__ == "__main__":

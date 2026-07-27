@@ -1,20 +1,12 @@
-"""Sim-to-sim self-test for the arm system-identification pipeline.
+"""Sim-to-sim self-test for the arm system-identification pipeline (no hardware).
 
-No hardware required. We pick *known* "true" values for the per-joint armature /
-frictionloss / damping and synthesise a realistic measured trajectory by
-**PD-controlling the true model** to track a chirp reference (exactly how the
-real ``pineapple_arm.py`` drives the arm), recording ``q``, ``dq`` and the
-applied joint torque ``tau``. We then run the same ``mujoco.sysid`` fitting
-machinery used by ``sysid_fit.py`` starting from the nominal (XML placeholder)
-guess and check that it recovers the injected values.
+Injects KNOWN armature/frictionloss/damping, synthesises measured data by
+PD-controlling the true model through a chirp (as pineapple_arm.py drives the arm),
+then runs sysid_fit.py's machinery from the nominal guess and checks recovery.
 
-Two drive modes are exercised, both fed the synthesised data:
-  * ``torque`` : replay the recorded joint torque through the motor actuators.
-  * ``pd``     : replay the position command through PD position actuators.
-
-PD tracking keeps the range-limited joints moving *within* their limits, so the
-trajectory stays sensitive to friction/armature/damping (an open-loop torque
-sweep would saturate against the joint limits and carry no information).
+PD tracking (not open-loop torque) keeps the range-limited joints moving WITHIN their
+limits, so the data stays sensitive to the parameters instead of saturating against
+the stops and carrying no information.
 
 Usage:
     python sim2sim_selftest.py                    # torque replay, noiseless
@@ -30,18 +22,21 @@ import sys
 
 import numpy as np
 
+import absl.logging
 import mujoco
 from mujoco import sysid
+
+absl.logging.set_verbosity(absl.logging.ERROR)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sysid_common as C
 
 
 # "True" parameters we want the optimiser to recover (per joint, motor order).
-TRUE = {
-    "armature":     np.array([0.020, 0.030, 0.025, 0.008, 0.006]),
-    "frictionloss": np.array([0.40, 0.50, 0.45, 0.20, 0.15]),
-    "damping":      np.array([0.30, 0.40, 0.35, 0.10, 0.08]),
+TRUE = {  # per joint incl. j5 = gripper_case (wrist-like values)
+    "armature":     np.array([0.10, 0.030, 0.025, 0.008, 0.006, 0.006]),
+    "frictionloss": np.array([0.20, 0.50, 0.45, 0.20, 0.15, 0.15]),
+    "damping":      np.array([0.10, 0.40, 0.35, 0.10, 0.08, 0.08]),
 }
 
 
@@ -68,7 +63,7 @@ def generate_pd(true_spec, t, q_cmd, kp, kd, seed=0, noise=0.0):
     is applied at ``t[k]`` and produces the state at ``t[k+1]``; the last torque
     is unused by the fitter):
       q, dq   : measured joint position / velocity
-      tau     : applied joint torque  (PD law with zero desired velocity)
+      tau     : applied, actuator-clamped joint torque
       q0, dq0 : initial state
     """
     model = true_spec.compile()
@@ -80,10 +75,13 @@ def generate_pd(true_spec, t, q_cmd, kp, kd, seed=0, noise=0.0):
     q = np.zeros((n, C.NUM_MOTORS))
     dq = np.zeros((n, C.NUM_MOTORS))
     tau = np.zeros((n, C.NUM_MOTORS))
+    lo = model.actuator_ctrlrange[:, 0]
+    hi = model.actuator_ctrlrange[:, 1]
     for k in range(n):
         q[k] = data.qpos
         dq[k] = data.qvel
-        tau[k] = kp * (q_cmd[k] - data.qpos) - kd * data.qvel  # PD, dq_des = 0
+        tau_cmd = kp * (q_cmd[k] - data.qpos) - kd * data.qvel
+        tau[k] = np.clip(tau_cmd, lo, hi)  # PD, dq_des = 0
         data.ctrl[:] = tau[k]
         mujoco.mj_step(model, data)
 
@@ -108,17 +106,18 @@ def main() -> int:
                     help="multiple-shooting segment length in steps")
     ap.add_argument("--tol", type=float, default=0.10,
                     help="max allowed median relative error to PASS")
+    ap.add_argument("--max-tol", type=float, default=0.25,
+                    help="max allowed worst-parameter relative error to PASS")
     args = ap.parse_args()
 
     t = np.arange(args.steps) * args.dt
     kp, kd = C.DEFAULT_KP, C.DEFAULT_KD
 
-    # centres = midpoint of each joint range (keeps the chirp within limits).
+    # Centre on each joint's range midpoint so the chirp stays within limits.
     m0 = C.fresh_spec(drive="torque", dt=args.dt).compile()
     centers = np.array([m0.jnt_range[i].mean() for i in range(m0.njnt)])
     q_cmd = chirp_reference(t, centers)
 
-    # --- synthesise "measured" data from the TRUE model via PD control -------
     true_spec = C.fresh_spec(drive="torque", dt=args.dt)  # gravity ON (realistic)
     apply_true(true_spec)
     q_meas, dq_meas, tau_meas = generate_pd(
@@ -130,7 +129,6 @@ def main() -> int:
           f"|dq|max {np.abs(dq_meas).max():.2f} rad/s, "
           f"|tau|max {np.abs(tau_meas).max():.2f} Nm")
 
-    # --- fit from the nominal (XML placeholder) guess ------------------------
     ctrl = tau_meas if args.drive == "torque" else q_cmd
     fit_spec = C.fresh_spec(drive=args.drive, dt=args.dt, kp=kp, kd=kd)
     ms = C.make_model_sequences(fit_spec, t, ctrl, q_meas, dq_meas, seg_steps=args.seg)
@@ -143,8 +141,7 @@ def main() -> int:
         verbose=False, max_iters=args.max_iters, x_scale="jac",
     )
 
-    # --- report + assert -----------------------------------------------------
-    # build_param_dict order is [armature x5, frictionloss x5, damping x5].
+    # build_param_dict order is [armature x6, frictionloss x6, damping x6].
     true_vec = np.concatenate([TRUE[a] for a in C.ALL_ATTRS])
     est_vec = opt_params.as_vector()
     print(opt_params.compare_parameters(init_vec, est_vec, measured_params=true_vec))
@@ -152,9 +149,10 @@ def main() -> int:
     rel = np.abs(est_vec - true_vec) / np.maximum(np.abs(true_vec), 1e-6)
     med, mx = float(np.median(rel)), float(np.max(rel))
     print(f"[selftest] relative error: median={med:.3%}  max={mx:.3%}")
-    ok = med < args.tol
+    ok = med < args.tol and mx < args.max_tol
     print(f"[selftest] {'PASS' if ok else 'FAIL'} "
-          f"(median rel err {med:.3%} {'<' if ok else '>='} tol {args.tol:.1%})")
+          f"(median={med:.3%}, max={mx:.3%}; limits "
+          f"{args.tol:.1%}/{args.max_tol:.1%})")
     return 0 if ok else 1
 
 

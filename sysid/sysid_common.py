@@ -1,24 +1,16 @@
 """Shared configuration and helpers for pineapple-arm system identification.
 
-This module centralises everything the data-collection, self-test and fitting
-scripts need so they stay consistent:
+Keeps collection, self-test and fitting consistent: model path, joint/actuator
+ordering (== Unitree motor index i in pineapple_arm.py), the identified parameters
+and their bounds, MjSpec builders, and the .npz log contract.
 
-  * the arm's MuJoCo model path, joint / actuator ordering (which matches the
-    Unitree ``motor_state[i]`` / ``motor_cmd[i]`` index ``i`` used by
-    ``pineapple_arm.py``),
-  * the per-joint dynamics parameters we identify (armature, frictionloss,
-    damping) with their bounds and how to write them into an ``MjSpec``,
-  * builders for the ``mujoco.sysid`` ``ParameterDict`` and for a fresh,
-    fit-ready ``MjSpec`` (torque-driven or PD-driven), and
-  * ``.npz`` logging helpers shared by collection and fitting.
-
-The identification method follows DeepMind's ``mujoco.sysid`` toolbox
-(box-constrained nonlinear least squares over a threaded ``mujoco.rollout``);
-see ``sysid_fit.py``.
+Method: DeepMind's ``mujoco.sysid`` box-constrained NLS over a threaded
+``mujoco.rollout``; see ``sysid_fit.py``.
 """
 
 from __future__ import annotations
 
+import os
 import pathlib
 from typing import Sequence
 
@@ -28,41 +20,41 @@ import mujoco
 from mujoco import sysid
 
 
-# --------------------------------------------------------------------------- #
-# Model + ordering
-# --------------------------------------------------------------------------- #
 
-# Absolute path to the arm model (fixed base, no floor -> ideal for arm sysid).
-ARM_XML = pathlib.Path(
-    "/home/csl/pineapple/pineapple_mujoco/pineapple_robots/pineapple_arm/pineapple_arm.xml"
+# Fixed-base arm model (no floor). The env override keeps this portable.
+_DEFAULT_ARM_XML = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "pineapple_mujoco/pineapple_robots/pineapple_arm/pineapple_arm.xml"
 )
+ARM_XML = pathlib.Path(os.environ.get("PINEAPPLE_ARM_XML", _DEFAULT_ARM_XML)).expanduser()
 
-# Joint order == actuator order == Unitree motor index 0..4 in pineapple_arm.py.
+# Joint order == actuator order == Unitree motor index 0..5; j5 is the gripper
+# wrist-roll. The 2 unactuated finger slides are welded in fresh_spec() so the
+# model is 6-DOF and matches the 6-column data.
 JOINTS = [
-    "arm_joint",        # motor 0  (DM-4340, ctrl +-27 Nm)
-    "arm_base_joint",   # motor 1  (DM-4340)
-    "upper_arm_joint",  # motor 2  (DM-4340)
-    "fore_arm_joint",   # motor 3  (DM-4310, ctrl +-7 Nm)
-    "5dof_joint",       # motor 4  (DM-4310)
+    "arm_joint",          # motor 0  (DM-4340, ctrl +-27 Nm)
+    "arm_base_joint",     # motor 1  (DM-4340)
+    "upper_arm_joint",    # motor 2  (DM-4340)
+    "fore_arm_joint",     # motor 3  (DM-4310, ctrl +-7 Nm)
+    "5dof_joint",         # motor 4  (DM-4310)
+    "gripper_case_joint", # motor 5  (DM-4310, wrist roll)
 ]
-ACTUATORS = ["arm_1_dof", "arm_2_dof", "arm_3_dof", "arm_4_dof", "arm_5_dof"]
+ACTUATORS = ["arm_1_dof", "arm_2_dof", "arm_3_dof", "arm_4_dof", "arm_5_dof", "arm_6_dof"]
 NUM_MOTORS = len(JOINTS)
 
-# Sampling period used on the real arm (pineapple_arm.py runs the low-cmd loop
-# at 200 Hz) and, by default, for the identification rollout.
+# Unactuated gripper-finger slide joints -- welded (removed) for identification.
+GRIPPER_FINGER_JOINTS = ["gripper_left_joint", "gripper_right_joint"]
+
+# 200 Hz, matching pineapple_arm.py's low-cmd loop.
 DT_DEFAULT = 0.005
 
-# PD gains used by the real controller (pineapple_arm.py Controller.kps / kds).
-# Needed for the optional PD-replay drive mode and logged during collection.
-DEFAULT_KP = np.array([20.0, 25.0, 25.0, 20.0, 20.0])
-DEFAULT_KD = np.array([0.1, 0.5, 0.5, 0.1, 0.1])
+# pineapple_arm.py Controller gains: used by PD-replay and logged at collection.
+DEFAULT_KP = np.array([20.0, 40.0, 40.0, 20.0, 20.0, 20.0])
+DEFAULT_KD = np.array([0.5, 1.0, 1.0, 0.5, 0.5, 0.5])
 
 
-# --------------------------------------------------------------------------- #
-# Parameters to identify: (attr, nominal, lower, upper)
-# --------------------------------------------------------------------------- #
-# Bounds are deliberately broad; tighten them once the DM-4310/DM-4340 datasheet
-# rotor-inertia / friction figures (or prior leg-tuned values) are known.
+# Bounds are deliberately broad; tighten once DM-4310/DM-4340 datasheet figures
+# are known.
 PARAM_BOUNDS = {
     # reflected rotor inertia [kg m^2]; XML nominal is 0.004
     "armature": (0.004, 1.0e-4, 0.5),
@@ -74,12 +66,8 @@ PARAM_BOUNDS = {
 ALL_ATTRS = ("armature", "frictionloss", "damping")
 
 
-# --------------------------------------------------------------------------- #
-# Writing a scalar joint-dynamics parameter into an MjSpec
-# --------------------------------------------------------------------------- #
-# In mujoco 3.10 MjsJoint, ``armature`` and ``frictionloss`` are scalars while
-# ``damping`` is exposed as a length-3 array (only element [0] is used for a
-# 1-DoF hinge). ``set_joint_dyn`` hides that asymmetry.
+# mujoco 3.10 MjsJoint: armature/frictionloss are scalars but damping is a
+# length-3 array (only [0] used for a hinge). set_joint_dyn hides that asymmetry.
 def set_joint_dyn(spec: mujoco.MjSpec, jname: str, attr: str, value: float) -> None:
     """Set ``attr`` (armature|frictionloss|damping) of joint ``jname`` in spec."""
     joint = spec.joint(jname)
@@ -107,20 +95,12 @@ def build_param_dict(
     per_joint_nominal: dict[str, np.ndarray] | None = None,
     freeze_attrs: Sequence[str] = (),
 ) -> sysid.ParameterDict:
-    """Build the ParameterDict of joint-dynamics parameters to identify.
+    """ParameterDict of the joint-dynamics parameters to identify.
 
-    Args:
-      attrs: which parameters to identify per joint (subset of ALL_ATTRS).
-      nominal: optional ``{attr: value}`` override of the initial guess (applied
-        to every joint).
-      per_joint_nominal: optional ``{attr: array(NUM_MOTORS)}`` override giving a
-        distinct initial guess per joint (takes precedence over ``nominal``).
-      freeze_attrs: attrs to hold FIXED at their nominal (``frozen=True``) instead
-        of optimizing -- use for parameters that the excitation can't observe
-        (e.g. armature on the heavy proximal joints under tight torque caps), so
-        they can't drift "confidently wrong" while absorbing model error.
-
-    Names are ``"<joint>/<attr>"`` (e.g. ``"arm_joint/armature"``).
+    Names are ``"<joint>/<attr>"``. ``per_joint_nominal`` overrides ``nominal``.
+    ``freeze_attrs`` holds an attr FIXED at nominal -- use it for parameters the
+    excitation cannot observe, so they cannot drift "confidently wrong" while
+    absorbing model error.
     """
     params = sysid.ParameterDict()
     for attr in attrs:
@@ -144,9 +124,6 @@ def build_param_dict(
     return params
 
 
-# --------------------------------------------------------------------------- #
-# Building a fit-ready MjSpec
-# --------------------------------------------------------------------------- #
 def make_position_actuators(
     spec: mujoco.MjSpec, kp: np.ndarray, kd: np.ndarray
 ) -> None:
@@ -154,17 +131,26 @@ def make_position_actuators(
 
     After this, actuator force = ``kp*(ctrl - q) - kd*qvel`` (i.e. a PD law with
     zero desired velocity), so feeding the logged position command ``q_cmd`` as
-    ``ctrl`` reproduces the real controller (the ``kd*dq_cmd`` feed-forward term
-    is neglected). Used by the optional ``drive="pd"`` mode.
+    ``ctrl`` reproduces the collector and ``pineapple_arm.py``. Used by the
+    optional ``drive="pd"`` mode.
     """
     for i, aname in enumerate(ACTUATORS):
         act = spec.actuator(aname)
+        # A motor's ctrlrange is a TORQUE limit. Once ctrl means position, that
+        # limit must move to forcerange or PD replay applies unbounded torque and
+        # stops matching the collector/bridge.
+        torque_range = np.asarray(act.ctrlrange, dtype=float).copy()
+        joint_range = np.asarray(spec.joint(JOINTS[i]).range, dtype=float).copy()
         act.gaintype = mujoco.mjtGain.mjGAIN_FIXED
         act.biastype = mujoco.mjtBias.mjBIAS_AFFINE
         act.gainprm[0] = kp[i]
         act.biasprm[0] = 0.0
         act.biasprm[1] = -kp[i]
         act.biasprm[2] = -kd[i]
+        act.forcerange = torque_range
+        act.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
+        act.ctrlrange = joint_range
+        act.ctrllimited = mujoco.mjtLimited.mjLIMITED_TRUE
 
 
 def fresh_spec(
@@ -177,22 +163,25 @@ def fresh_spec(
     integrator: str | None = None,
     gravity: bool = True,
 ) -> mujoco.MjSpec:
-    """Load a fresh ``MjSpec`` of the arm configured for identification.
+    """Fresh ``MjSpec`` of the arm configured for identification.
 
-    Args:
-      drive: ``"torque"`` (feed measured joint torque to the motors, default) or
-        ``"pd"`` (convert to PD position actuators, feed the position command).
-      dt: rollout timestep; ``None`` keeps the model default.
-      kp, kd: PD gains for ``drive="pd"`` (default DEFAULT_KP/KD).
-      disable_contacts: disable contact dynamics (arm sysid has no useful
-        contacts and it speeds up the rollout).
-      remove_visual: strip visual-only geometry/assets to speed compilation.
-      integrator: optional override, one of "euler", "implicit", "implicitfast",
-        "rk4"; ``None`` keeps the XML setting.
-      gravity: if False, zero out gravity (used by the sim-to-sim self-test to
-        isolate parameter recovery).
+    ``drive``: "torque" feeds measured joint torque to the motors; "pd" converts to
+    PD position actuators fed the position command. ``gravity=False`` is used by the
+    self-test to isolate parameter recovery.
     """
+    if not ARM_XML.is_file():
+        raise FileNotFoundError(
+            f"arm XML not found at {ARM_XML}; set PINEAPPLE_ARM_XML to its path"
+        )
     spec = mujoco.MjSpec.from_file(ARM_XML.as_posix())
+
+    # Weld the unactuated fingers: deleting the joints leaves the bodies rigidly
+    # attached (mass retained) so the model is 6-DOF. Safe: no tendons/equalities
+    # couple them.
+    for jname in GRIPPER_FINGER_JOINTS:
+        j = spec.joint(jname)
+        if j is not None:
+            spec.delete(j)
 
     if drive == "pd":
         make_position_actuators(
@@ -222,14 +211,11 @@ def fresh_spec(
     return spec
 
 
-# --------------------------------------------------------------------------- #
-# Packing measured data into mujoco.sysid TimeSeries / ModelSequences
-# --------------------------------------------------------------------------- #
 def obs_names() -> list[tuple[str, sysid.SignalType]]:
-    """Observation signals: joint positions then joint velocities (state-based).
+    """Observation signals: joint positions then velocities.
 
-    State observations are resolved by joint name inside the residual, so they
-    are robust to sensor ordering (unlike sensor-name observations).
+    State-based (resolved by joint NAME in the residual), so unlike sensor-name
+    observations this is robust to sensor ordering.
     """
     return [(j, sysid.SignalType.MjStateQPos) for j in JOINTS] + [
         (j, sysid.SignalType.MjStateQVel) for j in JOINTS
@@ -239,7 +225,7 @@ def obs_names() -> list[tuple[str, sysid.SignalType]]:
 def pack_measured(
     t: np.ndarray, q: np.ndarray, dq: np.ndarray, model: mujoco.MjModel
 ) -> sysid.TimeSeries:
-    """Measured joint pos+vel -> observation TimeSeries (columns [q(5), dq(5)])."""
+    """Measured joint pos+vel -> observation TimeSeries (columns [q(6), dq(6)])."""
     data = np.hstack([np.asarray(q), np.asarray(dq)])
     return sysid.TimeSeries.from_names(t, data, model, names=obs_names())
 
@@ -261,21 +247,26 @@ def make_model_sequences(
     sequence_name: str = "excite",
     seg_steps: int | None = 100,
 ) -> sysid.ModelSequences:
-    """Assemble a ModelSequences for the residual pipeline.
+    """ModelSequences for the residual pipeline.
 
-    With ``seg_steps`` set, the trajectory is split into consecutive
-    non-overlapping segments of that many steps, each re-initialised from the
-    corresponding *measured* state (multiple shooting). This is important for
-    open-loop torque replay: it stops the wrong-parameter model from drifting
-    arbitrarily far from the data over a long rollout, keeping the residual a
-    well-conditioned, sensitive function of the parameters. Pass ``None`` for a
-    single full-length sequence.
+    ``seg_steps`` splits the trajectory into segments each re-initialised from the
+    MEASURED state (multiple shooting). Essential for open-loop torque replay: it
+    stops a wrong-parameter model drifting arbitrarily far from the data, keeping
+    the residual well-conditioned and sensitive. ``None`` = one full-length sequence.
     """
     model = spec.compile()
     t = np.asarray(t); ctrl = np.asarray(ctrl)
     q = np.asarray(q); dq = np.asarray(dq)
     n = len(t)
     seg = n if seg_steps is None else int(seg_steps)
+    if n < 2:
+        raise ValueError("make_model_sequences requires at least 2 samples")
+    if seg < 2:
+        raise ValueError(f"seg_steps must be >=2 or None, got {seg_steps}")
+    expected = (n, NUM_MOTORS)
+    for label, arr in (("ctrl", ctrl), ("q", q), ("dq", dq)):
+        if arr.shape != expected:
+            raise ValueError(f"{label} shape must be {expected}, got {arr.shape}")
 
     names, states, controls, measures = [], [], [], []
     start, c = 0, 0
@@ -284,9 +275,8 @@ def make_model_sequences(
         if end - start < 2:
             break
         sl = slice(start, end)
-        # Local (zero-based) times: each segment's rollout restarts sim time at
-        # 0, so measured timestamps must too, else the residual's time window is
-        # empty.
+        # Zero-based times: each segment's rollout restarts sim time at 0, so the
+        # measured stamps must too or the residual's time window is empty.
         t_local = t[sl] - t[start]
         controls.append(pack_control(t_local, ctrl[sl], model))
         measures.append(pack_measured(t_local, q[sl], dq[sl], model))
@@ -301,11 +291,12 @@ def make_model_sequences(
     )
 
 
-# --------------------------------------------------------------------------- #
-# Dataset IO (.npz)  -- shared by collect_data.py and sysid_fit.py
-# --------------------------------------------------------------------------- #
-# Columns of every array are in JOINTS / motor order (index 0..4).
-LOG_KEYS = ("t", "q", "dq", "tau", "q_cmd", "dq_cmd", "tau_ff", "kp", "kd")
+# Columns of every per-joint array are in JOINTS / motor order (index 0..5).
+LOG_KEYS = (
+    "t", "t_cmd", "q", "dq", "tau", "q_cmd", "dq_cmd", "tau_ff",
+    "tick", "kp", "kd",
+)
+LOG_META_KEYS = ("schema_version", "time_source", "complete", "abort_reason")
 
 
 def save_log(path: str | pathlib.Path, **arrays) -> None:
@@ -321,6 +312,195 @@ def load_log(path: str | pathlib.Path) -> dict[str, np.ndarray]:
     """Load a logged trajectory ``.npz`` into a plain dict of arrays."""
     with np.load(path, allow_pickle=True) as npz:
         return {k: npz[k] for k in npz.files}
+
+
+def _scalar_string(value) -> str:
+    arr = np.asarray(value)
+    return str(arr.item()) if arr.size == 1 else ""
+
+
+def has_real_timestamps(log: dict) -> bool:
+    """Whether a log has credible state-arrival timestamps for resampling.
+
+    Schema-v2 names the clock explicitly; the fallback accepts the previous
+    collector revision (``tick`` + visibly non-uniform stamps). Legacy logs with
+    fabricated uniform ``arange*dt`` timestamps are REJECTED -- they cannot be repaired.
+    """
+    if _scalar_string(log.get("time_source", "")) == "state_arrival_perf_counter":
+        return True
+    if "tick" not in log or "t" not in log:
+        return False
+    t = np.asarray(log["t"], dtype=float).ravel()
+    d = np.diff(t)
+    return d.size > 0 and float(np.std(d)) > 1e-7
+
+
+def validate_log(log: dict, drive: str = "torque", min_samples: int = 3) -> None:
+    """Validate a collector log before any interpolation/model construction."""
+    required = {"t", "q", "dq", "tau", "joint_names"}
+    if drive == "pd":
+        required |= {"q_cmd", "kp", "kd"}
+    missing = sorted(required - set(log))
+    if missing:
+        raise ValueError(f"log is missing required keys: {missing}")
+
+    names = [str(x) for x in np.asarray(log["joint_names"]).ravel()]
+    if names != JOINTS:
+        raise ValueError(
+            "joint_names/order mismatch: "
+            f"expected {JOINTS}, got {names}; refusing to silently remap columns"
+        )
+
+    t = np.asarray(log["t"], dtype=float)
+    if t.ndim != 1 or len(t) < min_samples:
+        raise ValueError(f"t must be 1-D with at least {min_samples} samples")
+    if not np.all(np.isfinite(t)):
+        raise ValueError("t contains NaN/Inf")
+    n = len(t)
+
+    per_joint = ("q", "dq", "tau", "q_cmd", "dq_cmd", "tau_ff")
+    for key in per_joint:
+        if key not in log:
+            continue
+        arr = np.asarray(log[key])
+        if arr.shape != (n, NUM_MOTORS):
+            raise ValueError(
+                f"{key} shape must be {(n, NUM_MOTORS)}, got {arr.shape}"
+            )
+        if not np.all(np.isfinite(arr.astype(float))):
+            raise ValueError(f"{key} contains NaN/Inf")
+
+    for key in ("kp", "kd"):
+        if key not in log:
+            continue
+        arr = np.asarray(log[key])
+        if arr.shape not in ((NUM_MOTORS,), (n, NUM_MOTORS)):
+            raise ValueError(
+                f"{key} shape must be {(NUM_MOTORS,)} or {(n, NUM_MOTORS)}, "
+                f"got {arr.shape}"
+            )
+        if not np.all(np.isfinite(arr.astype(float))):
+            raise ValueError(f"{key} contains NaN/Inf")
+
+    if "t_cmd" in log:
+        t_cmd = np.asarray(log["t_cmd"], dtype=float)
+        if t_cmd.shape != (n,) or not np.all(np.isfinite(t_cmd)):
+            raise ValueError(f"t_cmd must be finite with shape {(n,)}")
+        if np.any(np.diff(t_cmd) <= 0):
+            raise ValueError("t_cmd must be strictly increasing")
+
+    if "tick" in log and np.asarray(log["tick"]).shape != (n,):
+        raise ValueError(f"tick must have shape {(n,)}")
+
+    if "complete" in log and not bool(np.asarray(log["complete"]).item()):
+        reason = _scalar_string(log.get("abort_reason", "unknown safety abort"))
+        raise ValueError(f"collector marked this log incomplete: {reason}")
+
+
+def dedup_mask(
+    q: np.ndarray,
+    t: np.ndarray,
+    dq: np.ndarray | None = None,
+    tau: np.ndarray | None = None,
+    tick: np.ndarray | None = None,
+) -> np.ndarray:
+    """Keep monotonic, genuinely new state frames.
+
+    A usable ``tick`` is authoritative. Otherwise a frame counts as duplicate only
+    when q, dq AND tau are all unchanged -- so legitimate quantized-position samples
+    whose velocity/torque moved are not discarded.
+    """
+    q = np.asarray(q, dtype=float)
+    t = np.asarray(t, dtype=float).ravel()
+    n = len(t)
+    if q.shape[0] != n:
+        raise ValueError("q/t length mismatch")
+    dq_arr = None if dq is None else np.asarray(dq, dtype=float)
+    tau_arr = None if tau is None else np.asarray(tau, dtype=float)
+    tick_arr = None if tick is None else np.asarray(tick).ravel()
+    use_tick = tick_arr is not None and tick_arr.shape == (n,) and np.unique(tick_arr).size > 1
+
+    keep = np.zeros(n, dtype=bool)
+    last = -1
+    for i in range(n):
+        if last >= 0 and t[i] <= t[last]:
+            continue
+        if last >= 0 and use_tick:
+            duplicate = tick_arr[i] == tick_arr[last]
+        elif last >= 0:
+            duplicate = np.array_equal(q[i], q[last])
+            if dq_arr is not None:
+                duplicate = duplicate and np.array_equal(dq_arr[i], dq_arr[last])
+            if tau_arr is not None:
+                duplicate = duplicate and np.array_equal(tau_arr[i], tau_arr[last])
+        else:
+            duplicate = False
+        if not duplicate:
+            keep[i] = True
+            last = i
+    return keep
+
+
+def resample_log(log: dict, dt: float = DT_DEFAULT) -> dict:
+    """Clean + resample a logged trajectory onto a uniform ``dt`` grid (new dict).
+
+    DDS collection is not synchronized with the arm/sim's publish thread, giving
+    duplicate frames (~12% on the async sim) and jittered timing. The fit assumes
+    exactly one ``dt`` step per sample, so raw logs BIAS armature/damping. Drops
+    duplicates, interpolates measured q/dq/tau, zero-order-holds commands/gains,
+    and honours separate state-arrival vs command-send stamps.
+
+    Exact for the real arm. On the async sim it removes the duplicate bias but
+    cannot recover SKIPPED physics steps (no true sim-time is published).
+    """
+    if not np.isfinite(dt) or dt <= 0:
+        raise ValueError(f"resample dt must be positive, got {dt}")
+    validate_log(log)
+    t_raw = np.asarray(log["t"], dtype=float).ravel()
+    keep = dedup_mask(
+        log["q"], t_raw,
+        dq=log.get("dq"), tau=log.get("tau"), tick=log.get("tick"),
+    )
+    t_state = t_raw[keep]
+    if t_state.size < 2:
+        raise ValueError("resample_log: <2 usable samples after dedup")
+    t_u = np.arange(t_state[0], t_state[-1] + 1e-9, dt)
+    out: dict = {}
+    for key in (
+        "joint_names", "schema_version", "time_source", "complete", "abort_reason"
+    ):
+        if key in log:
+            out[key] = np.asarray(log[key]).copy()
+
+    for key in ("q", "dq", "tau"):
+        if key not in log:
+            continue
+        arr = np.asarray(log[key], dtype=float)[keep]
+        out[key] = np.column_stack(
+            [np.interp(t_u, t_state, arr[:, j]) for j in range(arr.shape[1])]
+        )
+
+    # Commands use their own SEND timestamps: pairing them with state-arrival
+    # times creates a systematic PD-replay phase error.
+    t_ctrl = np.asarray(log.get("t_cmd", t_raw), dtype=float).ravel()
+    if np.any(np.diff(t_ctrl) <= 0):
+        raise ValueError("control timestamps must be strictly increasing")
+    ctrl_idx = np.searchsorted(t_ctrl, t_u, side="right") - 1
+    ctrl_idx = np.clip(ctrl_idx, 0, len(t_ctrl) - 1)
+    for key in ("q_cmd", "dq_cmd", "tau_ff", "kp", "kd"):
+        if key in log:
+            arr = np.asarray(log[key], dtype=float)
+            if arr.ndim == 1:
+                arr = np.tile(arr, (len(t_ctrl), 1))
+            out[key] = arr[ctrl_idx]
+
+    if "tick" in log:
+        state_idx = np.searchsorted(t_state, t_u, side="right") - 1
+        state_idx = np.clip(state_idx, 0, len(t_state) - 1)
+        out["tick"] = np.asarray(log["tick"])[keep][state_idx]
+    out["t"] = t_u - t_u[0]
+    out["t_cmd"] = out["t"].copy()
+    return out
 
 
 def save_identified_xml(opt_params: sysid.ParameterDict, out_path: str | pathlib.Path) -> None:

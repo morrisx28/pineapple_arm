@@ -1,0 +1,23 @@
+{
+  "joint_names": [
+    "arm_joint",
+    "arm_base_joint",
+    "upper_arm_joint",
+    "fore_arm_joint",
+    "5dof_joint",
+    "gripper_case_joint"
+  ],
+  "tau_cmd_scale": [1.0, 0.2, 0.3, 1.0651, 1.0, 1.0],
+  "basis": "PER-JOINT MEASUREMENTS, not a formula. arm_base_joint, upper_arm_joint and fore_arm_joint were measured; the other three carry no gravity, cannot be measured by dragging, and are left at 1.0 (uncorrected) -- that is an absence of data, NOT a statement that they are correct.",
+  "measured": {
+    "arm_base_joint": 0.2,
+    "upper_arm_joint": 0.3,
+    "fore_arm_joint": 1.0651
+  },
+  "measured_note": "Hand-tuned with arm_drag.py until the arm floated: trim 0.2/0.3/1.1 on top of the g_scale [1.0, 1.0, 0.9683] that arm_drag resolved from source_log. arm_base and upper_arm got g_scale 1.0 because their N_tau (6.06, 3.93) fell outside G_SCALE_BAND, so their totals are the trim values verbatim.",
+  "source_log": "data/grav_20260731_140236.npz",
+  "vs_theory": "The gain path gives S = N*pi, so N/S = 1/pi = 0.3183 is the scale the stray pi alone would predict. upper_arm (0.30, 6% off) and fore_arm (1.065 vs 1.0, 4% off) fit that. arm_base does NOT: it needs 0.2, a further ~1.6x below the prediction, despite being the same motor type as upper_arm. So the cause is per-JOINT, not per motor type, and these values are empirical -- do not regenerate them from a formula.",
+  "source": "arm_drag.py hand tuning on hardware, 2026-07-31",
+  "revert": "Delete this file to send uncorrected torque commands.",
+  "recollect_when": "Any damiao.cpp change. Re-run verify_gravity.py --fit-scale to see whether S moved, then re-tune with arm_drag.py -- the reported-torque factor N_tau in particular moves with firmware (6.06 raw vs 1.52 with TAU_MAX=112)."
+}

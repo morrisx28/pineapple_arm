@@ -3,7 +3,7 @@ import sys
 import numpy as np
 import threading
 import traceback
-import matplotlib.pyplot as plt # Import for plotting
+import matplotlib.pyplot as plt
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
@@ -14,7 +14,7 @@ from unitree_sdk2py.utils.crc import CRC
 from unitree_sdk2py.utils.thread import RecurrentThread
 
 import arm_ik  
-import arm_ff  # gravity + friction feedforward torque (pinocchio)
+import arm_ff
 
 NUM_MOTORS = 6
 
@@ -24,7 +24,6 @@ class Controller:
         
         self.target_dof_pos = np.zeros(NUM_MOTORS)
         self.target_dof_vel = np.zeros(NUM_MOTORS)
-        # Tuned by tune_pd.py (inertia-scaled, critically damped).
         self.kps = [20, 40, 40, 20, 20, 20]
         self.kds = [0.5, 1.0, 1.0, 0.5, 0.5, 0.5]
 
@@ -57,7 +56,7 @@ class Controller:
         self.mode = ''
         self.dt = 0.005
         self.transition_steps = int(3 / self.dt)
-        self.start_time = time.perf_counter() # To calculate elapsed time
+        self.start_time = time.perf_counter()
 
 
         self.crc = CRC()
@@ -72,7 +71,7 @@ class Controller:
         self.lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
 
         self.Start()
-        self.start_time = time.perf_counter() # Reset start time after threads are initialized
+        self.start_time = time.perf_counter()
 
         print("Initial Sucess !!!")
     
@@ -169,6 +168,12 @@ class Controller:
 
         Must run after moveToPose (which zeroes tau) and before the CRC/Write.
         Skipped until the first measured state arrives, leaving pure PD.
+
+        ``arm_ff.motor_tau`` converts the desired JOINT torque into what the interface
+        must be asked for -- otherwise arm_base is commanded 5x and upper_arm 3.3x too
+        strong (measured per joint; see model/tau_cmd_scale.json). The stiff PD hid that
+        here (a 14 Nm over-torque is 0.028 rad of offset), so expect no visible change in
+        hold quality, just a correct feedforward.
         """
         if self.low_state is None:
             return
@@ -176,10 +181,10 @@ class Controller:
             for i in range(NUM_MOTORS):
                 self.low_cmd.motor_cmd[i].tau = 0.0
             return
-        tau_ff = arm_ff.feedforward(
+        tau_ff = arm_ff.motor_tau(arm_ff.feedforward(
             self.qpos, self.qvel,
             gravity=self.use_gravity_comp, friction=self.use_friction_comp,
-        )
+        ))
         for i in range(NUM_MOTORS):
             self.low_cmd.motor_cmd[i].tau = float(tau_ff[i])
 

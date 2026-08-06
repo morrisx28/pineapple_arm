@@ -1,17 +1,7 @@
-"""Sim-to-sim self-test for the arm system-identification pipeline (no hardware).
+"""Recover injected dynamics parameters in a hardware-free sim-to-sim test.
 
-Injects KNOWN armature/frictionloss/damping, synthesises measured data by
-PD-controlling the true model through a chirp (as pineapple_arm.py drives the arm),
-then runs sysid_fit.py's machinery from the nominal guess and checks recovery.
-
-PD tracking (not open-loop torque) keeps the range-limited joints moving WITHIN their
-limits, so the data stays sensitive to the parameters instead of saturating against
-the stops and carrying no information.
-
-Usage:
-    python sim2sim_selftest.py                    # torque replay, noiseless
-    python sim2sim_selftest.py --drive pd
-    python sim2sim_selftest.py --noise 0.001
+PD-driven chirps keep range-limited joints moving without saturating at their stops, then
+the normal fitting pipeline starts from nominal parameters and checks recovery.
 """
 
 from __future__ import annotations
@@ -32,8 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sysid_common as C
 
 
-# "True" parameters we want the optimiser to recover (per joint, motor order).
-TRUE = {  # per joint incl. j5 = gripper_case (wrist-like values)
+# Injected parameters in motor order, including wrist-like values for j5.
+TRUE = {
     "armature":     np.array([0.10, 0.030, 0.025, 0.008, 0.006, 0.006]),
     "frictionloss": np.array([0.20, 0.50, 0.45, 0.20, 0.15, 0.15]),
     "damping":      np.array([0.10, 0.40, 0.35, 0.10, 0.08, 0.08]),

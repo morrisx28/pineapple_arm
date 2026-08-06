@@ -1,8 +1,7 @@
-"""Identify per-joint armature / frictionloss / damping for the pineapple arm.
+"""Fit per-joint armature, dry friction, and damping from a collector log.
 
-Fits the MuJoCo model to a ``collect_data.py`` log with DeepMind's ``mujoco.sysid``
-toolbox: box-constrained NLS over a threaded ``mujoco.rollout``, using multiple
-shooting so the open-loop rollout stays close to the data.
+The MuJoCo sysid fit uses box-constrained nonlinear least squares with threaded rollout
+and multiple shooting.
 
 Drive modes:
   * ``torque`` (default): replay measured joint torque. Most sensitive to the
@@ -10,11 +9,8 @@ Drive modes:
   * ``pd``: replay the position command. Robust to a biased torque sensor, but the
     closed loop MASKS the parameters -- cross-check only.
 
-Outputs under ``--out``: console table + intervals, the toolbox result files, the
-drop-in ``pineapple_arm_identified.xml`` (only when the fit VALIDATES), and plots.
-
-Example:
-    python sysid_fit.py --data data/arm_chirp_XXXX.npz --out results/run1
+An identified XML is emitted only when validation passes; diagnostic overrides remain
+non-successful and visibly marked.
 """
 
 from __future__ import annotations
@@ -30,7 +26,6 @@ import numpy as np
 import absl.logging
 from mujoco import sysid
 
-# Silence the per-compile allow_missing_sensors info spam.
 absl.logging.set_verbosity(absl.logging.ERROR)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -320,7 +315,7 @@ def main() -> int:
     ap.add_argument("--no-plots", action="store_true")
     args = ap.parse_args()
 
-    # --- load + prepare data (all arrays in JOINTS / motor order) ------------
+    # Load and prepare arrays in motor order.
     if args.dt is not None and args.dt <= 0:
         ap.error("--dt must be positive")
     if args.trim < 0:
@@ -425,7 +420,7 @@ def main() -> int:
           f"|dq|max {np.abs(dq).max():.2f} rad/s, |tau|max {np.abs(ctrl).max():.2f}"
           f"{' Nm' if args.drive=='torque' else ' rad(cmd)'}")
 
-    # --- build model + parameters -------------------------------------------
+    # Build model and parameters.
     fit_spec = C.fresh_spec(drive=args.drive, dt=dt, kp=kp, kd=kd)
     ms = C.make_model_sequences(fit_spec, t, ctrl, q, dq, seg_steps=args.seg)
     params = C.build_param_dict(attrs=args.attrs, freeze_attrs=args.freeze)
@@ -433,7 +428,7 @@ def main() -> int:
         return _reject(args.out, "all selected parameters are frozen")
     init_params = params.copy()
 
-    # --- optimize ------------------------------------------------------------
+    # Optimize.
     base_residual_fn = sysid.build_residual_fn(models_sequences=[ms])
     if args.reg > 0:
         # Tikhonov rows pull unconstrained directions toward nominal. Computed
@@ -464,7 +459,7 @@ def main() -> int:
         x_scale="jac",
     )
 
-    # --- report --------------------------------------------------------------
+    # Report.
     print("\n" + opt_params.compare_parameters(
         init_params.as_vector(), opt_params.as_vector()))
 
@@ -515,7 +510,7 @@ def main() -> int:
     for msg in quality_failures:
         print(f"  <-- FAIL: {msg}")
 
-    # --- save results + identified model ------------------------------------
+    # Save results and the validated model.
     _save_results(
         args.out, ms, init_params, opt_params, opt_result, covariance, intervals,
         interval_kind=ci_label,
@@ -605,11 +600,7 @@ def _plots(out, t, dt, q, dq, ctrl, fit_spec, opt_params, init_params,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # 1) data + fit-quality overview: measured vs identified rollout, shown BOTH
-    #    segment-wise (what multiple shooting optimizes) and as one open-loop
-    #    trajectory. The per-segment trace re-anchors to the measured state every
-    #    `seg` steps, so on its own it hides long-term drift -- the full rollout
-    #    is what exposes it.
+    # Segment rollouts show fit quality; the full rollout exposes accumulated drift.
     ident_spec = C.fresh_spec(drive=drive, dt=dt,
                               kp=C.DEFAULT_KP if kp is None else kp,
                               kd=C.DEFAULT_KD if kd is None else kd)
@@ -636,7 +627,7 @@ def _plots(out, t, dt, q, dq, ctrl, fit_spec, opt_params, init_params,
     fig.savefig(os.path.join(out, "fit_overview.png"), dpi=110)
     plt.close(fig)
 
-    # 2) identified parameters grouped by attribute, with CI error bars
+    # Identified parameters grouped by attribute, with confidence intervals.
     attrs = sorted({n.split("/")[1] for n in names})
     fig, axes = plt.subplots(1, len(attrs), figsize=(4 * len(attrs), 4))
     if len(attrs) == 1:

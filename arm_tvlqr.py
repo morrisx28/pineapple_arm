@@ -1,32 +1,16 @@
-"""End-effector trajectory tracking for the pineapple arm with time-varying LQR.
+"""Track a moving end-effector trajectory with time-varying LQR.
 
-``pineapple_arm.py`` can only go point-to-point: one IK solve, then PD-servo to the
-result. This tracks a *moving* EE trajectory by stabilizing the reference produced by
-``ee_traj.py`` with a TVLQR feedback law designed offline along that reference.
-
-Why TVLQR: ``K(t)`` is precomputed by a backward Riccati recursion, so the 200 Hz
-loop does one matrix-vector product -- no QP solver, no missed deadlines. Torque
-limits are handled by clamping, not as hard constraints (the trade vs convex MPC).
-
-Control law and how it combines with the hardware PD. The low-cmd applies, per motor,
+The reference, inverse-dynamics torque, and Riccati gains are computed offline. The
+200 Hz loop combines the model feedback with the low-level motor PD using the idealized
+command law
 
     tau_applied = tau_sent + kp*(q_des - q) + kd*(dq_des - dq)
 
-Sending ``q_des = q_ref, dq_des = dq_ref`` makes that PD its own feedback term
-``-K_pd @ x_err`` with ``K_pd = [diag(kp), diag(kd)]``. Naively adding an LQR torque
-on top would apply PD *and* LQR. Instead we send
-
     tau_sent = tau_ref - (K_lqr - K_pd) @ x_err     =>   tau_applied = tau_ref - K_lqr @ x_err
 
-so the closed loop sees exactly the optimal gain, while the joint PD still holds and
-damps the arm if DDS drops out or this process dies. ``tau_ref`` comes from inverse
-dynamics and already includes gravity, so ``arm_ff.gravity_torque`` is NOT added here.
-
-Offline first (no hardware):
-    python arm_tvlqr.py --dry-run   --shape line --p0 0.2 0 0.43 --p1 0.2 0 0.53
-    python arm_tvlqr.py --simulate  --shape circle --center 0.2 0 0.45 --radius 0.06
-Then on the robot:
-    python arm_tvlqr.py eth0 --shape line --p0 ... --p1 ... --duration 4
+This file does not model the repository's measured command-torque and gain-path scaling,
+so that cancellation is exact only under the idealized law. ``tau_ref`` already includes
+gravity. Torque limits are enforced by clamping rather than as hard constraints.
 """
 
 from __future__ import annotations
@@ -47,30 +31,20 @@ NUM_MOTORS = T.NUM_ARM_DOF          # 6
 NX, NU = 2 * NUM_MOTORS, NUM_MOTORS  # state [q; dq], input tau
 DT = 0.005                           # 200 Hz, matches pineapple_arm.py
 
-# Joint PD kept as the safety net (same gains as pineapple_arm.py Controller).
+# Nominal motor PD used by the idealized cancellation law.
 KP = np.array([20.0, 40.0, 40.0, 20.0, 20.0, 20.0])
 KD = np.array([0.5, 1.0, 1.0, 0.5, 0.5, 0.5])
 
-# Live safety limits.
 MOTOR_TAU_LIMIT = arm_ff.TAU_LIMIT                 # [27,27,27,7,7,7]
 SAFETY_TAU = 0.90 * MOTOR_TAU_LIMIT
 DQ_LIMIT = np.full(NUM_MOTORS, 6.0)                # rad/s abort ceiling
 TRACK_ABORT_RAD = 0.35                             # per-joint tracking error abort
 
-# Default LQR weights (per joint / per joint-velocity / per torque).
+# Default weights: joint position, joint velocity, and torque.
 Q_POS, Q_VEL, R_TAU = 100.0, 1.0, 0.05
 W_EE = 5.0e3        # task-space POSITION weight [1/m^2]
-# Task-space ORIENTATION weight [1/rad^2]. TUNED from the --simulate sweep on a line
-# (EE orientation RMS / |K|max):
-#     w_rot=0 -> 3.58 deg / 117   (translational-only cost: WORSE than the
-#                                  feedforward-only baseline's 2.19 deg -- the
-#                                  controller spent authority on position and let
-#                                  the wrist drift)
-#     5e2     -> 0.96 deg / 129   <- chosen: 3.7x better, only +10% gain
-#     2e3     -> 0.79 deg / 137
-#     1e4     -> 0.71 deg / 205   (diminishing returns, +75% gain amplifies sensor
-#                                  noise on hardware)
-# Position error does not degrade -- it improves slightly (5.24 -> 5.08 mm).
+# Task-space orientation weight [1/rad^2], chosen to improve rotation without the
+# high gains and noise sensitivity of larger values.
 W_ROT = 5.0e2
 
 
@@ -572,9 +546,12 @@ def main() -> int:
     # trajectory
     ap.add_argument("--shape", default="line",
                     choices=["hold", "line", "circle", "waypoints"])
-    ap.add_argument("--p0", type=float, nargs=3, default=[0.205, 0.0, 0.43])
-    ap.add_argument("--p1", type=float, nargs=3, default=[0.205, 0.0, 0.53])
-    ap.add_argument("--center", type=float, nargs=3, default=[0.205, 0.0, 0.45])
+    # z targets are in the shared URDF/MJCF base frame. They read 0.43/0.53/0.45 while
+    # model/robot.urdf mounted the arm 72.735 mm lower than the MJCF; +0.072735 keeps the
+    # same physical motion now that the two frames agree.
+    ap.add_argument("--p0", type=float, nargs=3, default=[0.205, 0.0, 0.502735])
+    ap.add_argument("--p1", type=float, nargs=3, default=[0.205, 0.0, 0.602735])
+    ap.add_argument("--center", type=float, nargs=3, default=[0.205, 0.0, 0.522735])
     ap.add_argument("--radius", type=float, default=0.05)
     ap.add_argument("--axis", type=float, nargs=3, default=[0.0, 1.0, 0.0])
     ap.add_argument("--turns", type=float, default=1.0)
@@ -646,7 +623,7 @@ def main() -> int:
     if args.shape == "waypoints" and (not args.points or len(args.points) % 3):
         ap.error("--points needs a multiple of 3 values (x y z per waypoint)")
 
-    # --- plan (shared by every mode) ----------------------------------------
+    # Shared plan for all modes.
     try:
         plan = build_plan(args)
     except (T.ReferenceError, ValueError) as e:
@@ -691,7 +668,7 @@ def main() -> int:
             _plot(plan, sim=dict(q=runs["lqr"][0]))
         return 0 if better else 1
 
-    # --- on-robot tracking ---------------------------------------------------
+    # On-robot tracking
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize
     print("WARNING: clear the workspace. The arm will move along the EE trajectory.")
     input("Press Enter to start TVLQR tracking...")

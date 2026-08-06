@@ -1,16 +1,7 @@
-"""Gravity + friction feedforward torque for the pineapple arm.
+"""Gravity and friction feedforward for the six-joint pineapple arm.
 
-Written into the Unitree low-cmd slot ``motor_cmd[i].tau``, whose control law is
-``tau_applied = tau_ff + kp*(q_des - q) + kd*(dq_des - dq)``, so the PD term is left
-handling only tracking error (less sag, easier hand-guiding).
-
-At nominal masses gravity matches the sysid MuJoCo model exactly (q=0:
-[0, 2.2, -6.97, -1.57, 0, 0] N*m). If ``model/gravity_calib.json`` exists (from
-``verify_gravity.py --apply``) link masses are scaled by the identified factors;
-delete that file to revert to nominal.
-
-Joint/motor order (i=0..5): arm_joint, arm_base_joint, upper_arm_joint,
-fore_arm_joint, 5dof_joint, gripper_case_joint.
+Physical joint torques remain separate from the calibrated ``motor_cmd.tau`` command
+domain. Optional link-mass and command-scale overlays live under ``model/``.
 """
 
 import json
@@ -23,13 +14,15 @@ import arm_ik
 
 NUM_ARM_DOF = arm_ik.NUM_ARM_DOF
 
-# Dedicated dynamics model so arm_ik's IK model stays kinematically pristine.
+# Keep calibration changes out of the kinematic IK model.
 CALIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "model", "gravity_calib.json")
+TAU_CMD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "model", "tau_cmd_scale.json")
 GRAV_MODEL = pinocchio.buildModelFromUrdf(arm_ik.URDF_FILENAME)
 GRAV_DATA = GRAV_MODEL.createData()
 
-# Arm links are pinocchio body indices 1..NUM_ARM_DOF (0 = universe).
+# Pinocchio body 0 is the universe; bodies 1..6 are the arm links.
 _ARM_JOINT_NAMES = ["arm_joint", "arm_base_joint", "upper_arm_joint",
                     "fore_arm_joint", "5dof_joint", "gripper_case_joint"]
 MASS_SCALE_MIN, MASS_SCALE_MAX = 0.5, 1.5
@@ -80,10 +73,69 @@ if _GRAV_SCALES is not None:
     print("[arm_ff] gravity compensation using calibrated link mass scales: "
           + np.array2string(np.round(_GRAV_SCALES, 3)))
 
-# Motor limits [N*m]: DM-4340 (j0-2) +-27, DM-4310 (j3-5) +-7. tau_ff is clamped
-# below these so tau_ff + PD cannot saturate the drive.
-TAU_LIMIT = np.array([27.0, 27.0, 27.0, 7.0, 7.0, 7.0])
+# Motor limits [N*m]. j0 is deliberately held below its DM-4340 rating; feedforward
+# leaves headroom for feedback. Some controllers also derive cost weights from this table.
+TAU_LIMIT = np.array([10.0, 27.0, 27.0, 10.0, 7.0, 7.0])
 FF_CLAMP_FRAC = 0.8  # leaves headroom for the PD term
+
+# Commanded-torque calibration
+# The interface has measured per-joint command gains, so these factors must be loaded
+# from data rather than derived from motor type or the gain-path scale. Unmeasured joints
+# remain at 1.0. Apply this command-domain correction only in ``motor_tau``; dynamics and
+# feedforward functions return physical joint torque.
+TAU_CMD_SCALE_MIN, TAU_CMD_SCALE_MAX = 0.1, 3.0
+
+
+def load_tau_cmd_scale(path=TAU_CMD_PATH):
+    """Per-joint commanded-torque scale (6,) from the overlay, or ``None``.
+
+    Fail-safe exactly like :func:`load_gravity_calibration`: missing / malformed /
+    wrong-order / out-of-range yields ``None`` so the caller falls back to 1.0 (send what
+    was asked for) rather than crashing the hardware controller. Delete the file to
+    revert to uncorrected commands.
+    """
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        names = list(data["joint_names"])
+        scales = np.asarray(data["tau_cmd_scale"], dtype=float)
+    except Exception as e:
+        print(f"[arm_ff] WARNING: ignoring commanded-torque scale {path}: {e}")
+        return None
+    if names != _ARM_JOINT_NAMES:
+        print(f"[arm_ff] WARNING: tau_cmd_scale joint order mismatch; ignoring {path}")
+        return None
+    if scales.shape != (NUM_ARM_DOF,) or not np.all(np.isfinite(scales)):
+        print(f"[arm_ff] WARNING: tau_cmd_scale needs {NUM_ARM_DOF} finite values; "
+              f"ignoring {path}")
+        return None
+    if (np.any(scales < TAU_CMD_SCALE_MIN) or np.any(scales > TAU_CMD_SCALE_MAX)):
+        print(f"[arm_ff] WARNING: tau_cmd_scale outside "
+              f"[{TAU_CMD_SCALE_MIN}, {TAU_CMD_SCALE_MAX}]; ignoring {path}")
+        return None
+    return scales
+
+
+_TAU_CMD = load_tau_cmd_scale()
+TAU_CMD_SCALE = np.ones(NUM_ARM_DOF) if _TAU_CMD is None else _TAU_CMD
+if _TAU_CMD is not None:
+    print("[arm_ff] commanded-torque scale: " + np.array2string(np.round(TAU_CMD_SCALE, 4)))
+
+
+def motor_tau(tau_joint, clamp=True):
+    """Desired JOINT torque [N*m] -> the value to write into ``motor_cmd.tau``, (6,).
+
+    Every controller must funnel its feedforward through here; sending a raw joint torque
+    over-drives the measured joints badly (arm_base by 5x, upper_arm by 3.3x). The clamp
+    lives here rather than in :func:`feedforward` so it bounds what is actually published.
+    """
+    tau = TAU_CMD_SCALE * np.asarray(tau_joint, float)[:NUM_ARM_DOF]
+    if clamp:
+        lim = FF_CLAMP_FRAC * TAU_LIMIT
+        tau = np.clip(tau, -lim, lim)
+    return tau
 
 # Coulomb friction [N*m]. Deliberately CONSERVATIVE: the sysid-identified
 # frictionloss is unreliable for the distal joints (5dof / gripper_case came back

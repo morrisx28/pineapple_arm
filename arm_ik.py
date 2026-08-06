@@ -1,9 +1,6 @@
-"""End-effector 6-DOF pose inverse kinematics (pinocchio).
+"""Pinocchio 6-DOF end-effector inverse kinematics.
 
-Joint order matches the hardware motor_cmd[i]/motor_state[i] (i=0..5) one-to-one,
-same sign, no offset, so solve_ik's output goes straight into target_dof_pos[i]:
-    0 arm_joint, 1 arm_base_joint, 2 upper_arm_joint,
-    3 fore_arm_joint, 4 5dof_joint, 5 gripper_case_joint
+The first six model joints match hardware order, sign, and offset.
 """
 
 import os
@@ -66,7 +63,6 @@ def solve_ik(current_q, target_pos, target_rot=None):
     i = 0
     while True:
         pinocchio.forwardKinematics(model, data, q)
-        # 6D pose error: [translation(3), rotation(3)]
         iMd = data.oMi[JOINT_ID].actInv(oMdes)
         err = pinocchio.log(iMd).vector
 
@@ -82,7 +78,7 @@ def solve_ik(current_q, target_pos, target_rot=None):
         J = -np.dot(pinocchio.Jlog6(iMd.inverse()), J)
         v = -J.T.dot(solve(J.dot(J.T) + damp * np.eye(6), err))
         q = pinocchio.integrate(model, q, v * DT)
-        # Clamp to URDF limits so numerical divergence can't yield an invalid config.
+        # Keep a non-converged iterate within the URDF's valid configuration domain.
         q[0:NUM_ARM_DOF] = np.clip(
             q[0:NUM_ARM_DOF],
             model.lowerPositionLimit[0:NUM_ARM_DOF],

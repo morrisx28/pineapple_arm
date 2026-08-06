@@ -1,22 +1,9 @@
-"""Collect a system-identification excitation dataset on the REAL pineapple arm.
+"""Collect a system-identification excitation dataset on the real arm.
 
-Extends pineapple_arm.py's DDS controller: PD position-controls the 6 joints through
-a per-joint chirp + slow triangle (for low-speed friction) and logs measured
-q/dq/tau plus commands and gains at 200 Hz into an ``.npz`` for ``sysid_fit.py``.
-Desired velocity is zero, matching pineapple_arm.py and sysid_fit's PD replay.
-
-Standalone (only unitree_sdk2py + numpy) so it runs in the arm's runtime without
-MuJoCo. Keys match ``sysid_common.LOG_KEYS`` plus schema/completeness metadata,
-all arrays in motor index order 0..5.
-
-Safety: commands hard-clamped inside each joint's range; smooth ramp to the start
-pose; live watchdog aborts on stale state or torque/velocity/range breach; always
-ramps back to neutral on finish/Ctrl-C.
-
-Validate offline first (no hardware):
-    python collect_data.py --dry-run                 # writes a preview plot
-Then, on the robot:
-    python collect_data.py [network_interface]       # e.g. eth0 (default: lo)
+A zero-desired-velocity PD controller excites each joint with a tapered chirp and slow
+triangle while logging state, commands, gains, and timing at 200 Hz. The standalone
+collector requires no MuJoCo. Commands are range-clamped, a watchdog fails closed, and
+every exit path ramps back to neutral.
 """
 
 from __future__ import annotations
@@ -28,7 +15,7 @@ import time
 
 import numpy as np
 
-# Duplicated from sysid_common.py so collection needs no MuJoCo. Motor order 0..5.
+# Duplicated deliberately so hardware collection does not import MuJoCo.
 NUM_MOTORS = 6
 DT = 0.005  # 200 Hz, matches pineapple_arm.py
 LOG_SCHEMA_VERSION = 2
@@ -41,36 +28,25 @@ JOINT_NAMES = ["arm_joint", "arm_base_joint", "upper_arm_joint",
 JOINT_LOW = np.array([-1.5708, 0.0, -3.1416, -1.5708, -1.5708, -1.5708])
 JOINT_HIGH = np.array([1.5708, 3.1416, 0.0, 1.7453, 1.5708, 1.5708])
 
-# Neutral pose to excite around (feasible, mildly extended). Clamped to limits.
 CENTER = np.array([0.0, 0.8, -0.8, 0.3, 0.0, 0.0])
 
-# Excitation is sized so realized peaks stay under these: torque saturation
-# destroys parameter information (it caused the earlier armature gap). The
-# gravity-loaded shoulder/elbow get 18 Nm because upper_arm alone holds ~7 Nm
-# against gravity, leaving no room under 10. Distal j3/j4/j5 are DM-4310 (+-7 Nm),
-# so their effective cap is ~7 regardless of the number here.
+# Saturation destroys parameter information. Shoulder caps leave gravity headroom; the
+# distal motors remain bounded by their 7 Nm hardware limit.
 TARGET_TAU = np.array([10.0, 18.0, 18.0, 10.0, 10.0, 10.0])  # peak |joint torque| [Nm]
 TARGET_DQ = np.array([20.0, 10.0, 10.0, 20.0, 20.0, 20.0])   # peak |joint velocity| [rad/s]
 MOTOR_TAU_LIMIT = np.array([27.0, 27.0, 27.0, 7.0, 7.0, 7.0])
-# Just inside ctrlrange, so rail hits are visible before the bridge clamps them.
+# Stay just inside ctrlrange so rail hits remain observable.
 SAFETY_TAU = np.minimum(TARGET_TAU, 0.98 * MOTOR_TAU_LIMIT)
-# Ceiling for the first async/real run: the synchronous sizer otherwise grows
-# lightly loaded roll joints to their full range despite DDS-delay resonance.
+# Limit lightly loaded roll joints because the synchronous sizer omits DDS delay.
 DESIGN_AMP_MAX = np.array([0.5, 0.4, 0.4, 0.8, 0.6, 0.6])
 
-# Amplitude [rad] and chirp top frequency [Hz], SIZED OFFLINE by
-# check_excitation.py. Re-run it whenever the trajectory, gains, CENTER or model
-# change, and paste the recommendation here.
-# WARNING: that sizer is SYNCHRONOUS and under-predicts the async-DDS simulator
-# (~1-step ZOH delay). Its first values drove the roll joints into resonance --
-# 5dof hit 51 rad/s and coupled torque spikes into the held joints, violating the
-# caps. Roll-joint F1 (j0,j3,j4) is therefore kept LOW. Always re-verify realized
-# peaks with `check_excitation.py --analyze <npz>` before raising anything.
+# Amplitude [rad] and chirp ceiling [Hz], sized offline. Re-run sizing after changing
+# the trajectory, gains, center, or model, then verify collected async-DDS peaks before
+# increasing the roll-joint frequencies.
 AMP = np.array([0.403, 0.220, 0.346, 0.695, 0.600, 0.600])
 F1 = np.array([1.8, 1.2, 1.2, 1.6, 1.3, 1.3])
 
-# PD gains used by pineapple_arm.py Controller at the time of collection. They
-# are CLI-overridable and always stored in the log.
+# CLI-overridable gains are stored in every log for faithful replay.
 KP = np.array([20.0, 40.0, 40.0, 20.0, 20.0, 20.0])
 KD = np.array([0.5, 1.0, 1.0, 0.5, 0.5, 0.5])
 

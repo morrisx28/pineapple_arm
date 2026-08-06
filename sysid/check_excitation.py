@@ -1,24 +1,12 @@
-"""Offline sizing + verification of the arm sysID excitation (no hardware).
+"""Size and verify system-identification excitation without hardware.
 
-WHY THIS EXISTS: the earlier armature-identification gap traced to the excitation
-SATURATING the proximal joints (|tau| pinned at the +-27 Nm ctrlrange). Saturated
-intervals carry almost no armature information (it only shows through joint
-acceleration), so the optimiser could not pin it; the never-saturating distal joint
-was identified fine.
-
-Simulates the excitation with the SAME torque-clamped PD law as the Unitree MuJoCo
-bridge (`simulate_python/unitree_sdk2py_bridge.py:111-123`):
+The rollout mirrors the bridge's torque-clamped PD law:
 
     ctrl = kp*(q_cmd - q) - kd*dq,  then clamp to the actuator ctrlrange
 
-then SIZES each amplitude so realized |tau|/|dq| stay under TARGET_TAU/TARGET_DQ
-(printing constants to paste into collect_data.py), REPORTS realized peaks and
-saturation, and runs an OBSERVABILITY check that refits known injected parameters.
-
-Usage:
-    python check_excitation.py                 # size + verify + observability
-    python check_excitation.py --compare-old   # also show the old saturating one
-    python check_excitation.py --analyze <npz> # realized peaks from collected data
+It sizes amplitudes below torque and velocity caps, reports saturation, and checks
+observability by recovering injected parameters. Avoiding saturation is essential because
+armature information appears through acceleration.
 """
 
 from __future__ import annotations
@@ -40,16 +28,14 @@ import sysid_common as C
 import collect_data as cd
 from sim2sim_selftest import TRUE  # large distinct known params (default GT)
 
-# Small distinct GT near the arm's real regime. At this scale armature is only
-# marginally observable, so it exposes the excitation's effect far more clearly
-# than the large TRUE values do.
+# Small ground truth near the real regime makes marginal armature observability visible.
 SMALL_GT = {
     "armature":     np.array([0.004, 0.006, 0.005, 0.007, 0.004, 0.005]),
     "frictionloss": np.array([0.10, 0.13, 0.11, 0.09, 0.08, 0.09]),
     "damping":      np.array([0.02, 0.03, 0.025, 0.015, 0.02, 0.02]),
 }
 
-# The original excitation that saturated the proximal joints (for --compare-old).
+# Saturating baseline retained for ``--compare-old``.
 OLD_AMP = np.array([0.6, 0.6, 0.6, 0.5, 0.7, 0.7])
 OLD_F1 = 2.0
 OLD_COMBINED = 0.6
@@ -69,7 +55,6 @@ def simulate_clamped_pd(model, q_cmd, kp, kd):
     tau_ap = np.zeros((n, C.NUM_MOTORS)); tau_cmd = np.zeros((n, C.NUM_MOTORS))
     for k in range(n):
         q[k] = data.qpos; dq[k] = data.qvel
-        # Collector and pineapple_arm.py both command zero desired velocity.
         u = kp * (q_cmd[k] - data.qpos) - kd * data.qvel
         tau_cmd[k] = u
         uc = np.clip(u, lo, hi)
@@ -304,7 +289,7 @@ def main() -> int:
     kp, kd = C.DEFAULT_KP, C.DEFAULT_KD
     nominal = C.fresh_spec(drive="torque", dt=args.dt).compile()  # GT-defaults model
 
-    # --- size NEW amplitudes to the caps -------------------------------------
+    # Size amplitudes to the caps.
     print("Sizing per-joint amplitudes to TARGET_TAU/TARGET_DQ (bridge-clamped PD)...")
     amp_new, rows = size_amplitudes(nominal, kp, kd, cd.F1, args.dt)
     print(f"\n{'joint':16s} {'amp[rad]':>8s} {'|tau|':>6s} {'|dq|':>6s} "
@@ -315,7 +300,7 @@ def main() -> int:
     print(f"  AMP = np.array([{', '.join(f'{a:.3f}' for a in amp_new)}])")
     print(f"  F1  = np.array([{', '.join(f'{f:.2f}' for f in cd.F1)}])")
 
-    # --- verify the FULL new excitation (sequential, combined phase off) -----
+    # Verify the full sequential excitation.
     t, q_new = cd.build_excitation(dt=args.dt, per_joint_s=14.0, amp=amp_new,
                                    f1=cd.F1, combined_s=0.0)
     # Fail-closed so CI cannot treat printed failures as success.
@@ -327,7 +312,7 @@ def main() -> int:
                                          combined_scale=OLD_COMBINED)
         report_peaks(nominal, t_o, q_old, kp, kd, "OLD (previous)")  # reference only
 
-    # --- observability: does the excitation actually identify armature? ------
+    # Verify armature observability.
     obs_ok = True
     if not args.no_observability:
         obs_ok = observability(amp_new, cd.F1, 0.0, kp, kd, args.dt, "NEW (sized)",

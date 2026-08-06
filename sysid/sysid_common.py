@@ -1,12 +1,4 @@
-"""Shared configuration and helpers for pineapple-arm system identification.
-
-Keeps collection, self-test and fitting consistent: model path, joint/actuator
-ordering (== Unitree motor index i in pineapple_arm.py), the identified parameters
-and their bounds, MjSpec builders, and the .npz log contract.
-
-Method: DeepMind's ``mujoco.sysid`` box-constrained NLS over a threaded
-``mujoco.rollout``; see ``sysid_fit.py``.
-"""
+"""Shared model, ordering, parameter bounds, and log helpers for arm system ID."""
 
 from __future__ import annotations
 
@@ -19,8 +11,6 @@ import numpy as np
 import mujoco
 from mujoco import sysid
 
-
-
 # Fixed-base arm model (no floor). The env override keeps this portable.
 _DEFAULT_ARM_XML = (
     pathlib.Path(__file__).resolve().parents[2]
@@ -28,9 +18,8 @@ _DEFAULT_ARM_XML = (
 )
 ARM_XML = pathlib.Path(os.environ.get("PINEAPPLE_ARM_XML", _DEFAULT_ARM_XML)).expanduser()
 
-# Joint order == actuator order == Unitree motor index 0..5; j5 is the gripper
-# wrist-roll. The 2 unactuated finger slides are welded in fresh_spec() so the
-# model is 6-DOF and matches the 6-column data.
+# Joint, actuator, and motor order are identical. Weld finger slides to match six-column
+# hardware data.
 JOINTS = [
     "arm_joint",          # motor 0  (DM-4340, ctrl +-27 Nm)
     "arm_base_joint",     # motor 1  (DM-4340)
@@ -45,16 +34,14 @@ NUM_MOTORS = len(JOINTS)
 # Unactuated gripper-finger slide joints -- welded (removed) for identification.
 GRIPPER_FINGER_JOINTS = ["gripper_left_joint", "gripper_right_joint"]
 
-# 200 Hz, matching pineapple_arm.py's low-cmd loop.
 DT_DEFAULT = 0.005
 
-# pineapple_arm.py Controller gains: used by PD-replay and logged at collection.
+# Controller gains used for PD replay and stored at collection.
 DEFAULT_KP = np.array([20.0, 40.0, 40.0, 20.0, 20.0, 20.0])
 DEFAULT_KD = np.array([0.5, 1.0, 1.0, 0.5, 0.5, 0.5])
 
 
-# Bounds are deliberately broad; tighten once DM-4310/DM-4340 datasheet figures
-# are known.
+# Broad bounds avoid assuming unavailable motor datasheet values.
 PARAM_BOUNDS = {
     # reflected rotor inertia [kg m^2]; XML nominal is 0.004
     "armature": (0.004, 1.0e-4, 0.5),
@@ -66,8 +53,8 @@ PARAM_BOUNDS = {
 ALL_ATTRS = ("armature", "frictionloss", "damping")
 
 
-# mujoco 3.10 MjsJoint: armature/frictionloss are scalars but damping is a
-# length-3 array (only [0] used for a hinge). set_joint_dyn hides that asymmetry.
+# MuJoCo stores hinge damping in element 0 of a length-three vector, unlike the scalar
+# armature and friction fields.
 def set_joint_dyn(spec: mujoco.MjSpec, jname: str, attr: str, value: float) -> None:
     """Set ``attr`` (armature|frictionloss|damping) of joint ``jname`` in spec."""
     joint = spec.joint(jname)

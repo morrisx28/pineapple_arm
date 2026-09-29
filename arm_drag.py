@@ -23,7 +23,7 @@ import numpy as np
 import arm_ff
 import ee_traj as T
 import verify_gravity as VG
-from arm_tvlqr import check_gains
+from arm_control import check_gains
 
 NUM_MOTORS = 6
 DT = 0.005  # 200 Hz, matches pineapple_arm.py
@@ -37,7 +37,7 @@ KD_HOLD = np.array([0.5, 1.0, 1.0, 0.5, 0.5, 0.5])
 # Desired damping before gain-path correction; keep it low for backdrivability.
 KD_DRAG = np.array([0.2, 0.2, 0.2, 0.1, 0.1, 0.1])
 
-# Live safety limits (same basis as verify_gravity.py / arm_tvlqr.py).
+# Live safety limits (same basis as verify_gravity.py / arm_control.py).
 MOTOR_TAU_LIMIT = arm_ff.TAU_LIMIT                  # [27,27,27,7,7,7]
 SAFETY_TAU = 0.90 * MOTOR_TAU_LIMIT
 DQ_LIMIT = np.full(NUM_MOTORS, 10.0)                 # rad/s hard abort ceiling

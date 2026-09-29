@@ -36,7 +36,7 @@ def build_arm_model(apply_calibration: bool = True):
 
     ``arm_ik.IK_MODEL`` is nq=nv=8 (6 arm + 2 finger slides). Locking keeps the finger
     mass but removes the DOFs so the dynamics are square and match the actuated
-    joints (same reason ``sysid_common.fresh_spec`` welds them in MuJoCo).
+    joints (same reason ``arm_mujoco.fresh_spec`` welds them in MuJoCo).
     Applies ``model/gravity_calib.json`` mass scales so this agrees with the gravity
     compensation the hardware is actually running.
     """

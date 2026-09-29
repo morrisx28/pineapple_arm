@@ -128,8 +128,7 @@ class SmoothMoveController:
         self.kp = np.asarray(kp, float)
         self.kd = np.asarray(kd, float)
         for name, g in (("kp", self.kp), ("kd", self.kd)):
-            # Validated BEFORE the publisher exists: arm_tvlqr once published nan to the
-            # motors because a bad --kp reached the wire.
+            # Validate before creating the publisher so invalid gains cannot reach motors.
             if g.shape != (NUM_MOTORS,) or not np.all(np.isfinite(g)) or np.any(g < 0):
                 raise ValueError(f"{name} must be {NUM_MOTORS} finite non-negative "
                                  f"values, got {g}")

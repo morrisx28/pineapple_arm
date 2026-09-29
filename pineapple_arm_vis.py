@@ -52,7 +52,7 @@ STEPS_PER_TICK = max(1, int(round((1.0 / FPS) / PUBLISH_DT)))   # 4
 # Reuse the dynamics model for each planner torque check.
 PLANT_MODEL = ee_traj.build_arm_model()
 
-# Live safety limits (same basis as verify_gravity.py / collect_data.py).
+# Live safety limits (same basis as verify_gravity.py).
 STATE_TIMEOUT = 0.2                   # s; older measured state => stop commanding
 SAFETY_TAU = 0.90 * arm_ff.TAU_LIMIT  # [27,27,27,7,7,7] * 0.9
 DQ_LIMIT = np.full(NUM_ARM, 6.0)      # rad/s

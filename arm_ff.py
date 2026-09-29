@@ -137,10 +137,7 @@ def motor_tau(tau_joint, clamp=True):
         tau = np.clip(tau, -lim, lim)
     return tau
 
-# Coulomb friction [N*m]. Deliberately CONSERVATIVE: the sysid-identified
-# frictionloss is unreliable for the distal joints (5dof / gripper_case came back
-# pinned at their bounds from cap-violating data). Do NOT paste params_x_hat.yaml
-# here blindly -- only update from a trustworthy fit, and reject bound-stuck values.
+# Conservative Coulomb friction [N*m]; only update from trusted measurements.
 FRICTIONLOSS = np.array([0.10, 0.10, 0.10, 0.10, 0.10, 0.10])
 FRICTION_SCALE = 0.6       # < 1: deliberately under-compensate to avoid limit cycles
 FRICTION_VEL_EPS = 0.05    # rad/s: tanh smoothing width so it does not chatter at rest

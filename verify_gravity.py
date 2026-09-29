@@ -35,7 +35,7 @@ CENTER = np.array([0.0, 0.8, -0.8, 0.3, 0.0, 0.0])
 KP = np.array([20.0, 40.0, 40.0, 20.0, 20.0, 20.0])
 KD = np.array([0.5, 1.0, 1.0, 0.5, 0.5, 0.5])
 
-# Live safety limits (same basis as sysid/collect_data.py).
+# Live safety limits (shared motor torque and velocity limits).
 MOTOR_TAU_LIMIT = np.array([27.0, 27.0, 27.0, 7.0, 7.0, 7.0])
 SAFETY_TAU = 0.90 * MOTOR_TAU_LIMIT
 DQ_LIMIT = np.array([30.0, 10.0, 10.0, 30.0, 30.0, 30.0])  # rad/s abort ceiling
@@ -671,8 +671,8 @@ def _write_calib_report(npz_path, rows, rms_before, rms_after, reg):
         "# links are held near 1; trust the residual-RMS drop, not each number.",
         f"# residual RMS: {rms_before:.5f} -> {rms_after:.5f} Nm   (reg={reg})",
         "#",
-        "# To apply: multiply each link's <mass> in model/robot.urdf by mass_scale,",
-        "# then mirror into the MuJoCo model sysid/results/latest/pineapple_arm.xml.",
+        "# To apply a fit that passes the gate: run --analyze <log.npz> --apply.",
+        "# This writes model/gravity_calib.json; restart controllers to reload it.",
         "# Re-run --analyze on a NEW collection to confirm the error dropped.",
         "links:",
     ]
@@ -1814,7 +1814,7 @@ def main() -> int:
             print(f"[collect] INCOMPLETE: {str(log['abort_reason'].item())}")
             print("[collect] partial log saved for diagnosis.")
             return 2
-        print(f"[collect] next: python verify_gravity.py --analyze {out}")
+        print(f"[collect] next: python verify_gravity.py --fit-scale {out}")
     return 0
 
 
